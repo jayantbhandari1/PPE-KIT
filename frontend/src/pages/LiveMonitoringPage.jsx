@@ -261,7 +261,9 @@ export default function LiveMonitoringPage() {
         missingPPE: data.missing_ppe || [],
         detectedClasses: data.detected_classes || [],
         persons: data.persons || [],
-        annotatedImage: data.annotated_image ? `data:image/jpeg;base64,${data.annotated_image}` : null,
+        annotatedImage: data.annotated_image
+          ? (data.annotated_image.startsWith('data:') ? data.annotated_image : `data:image/jpeg;base64,${data.annotated_image}`)
+          : null,
         latencyMs: duration,
         timestamp: new Date().toLocaleTimeString(),
       });

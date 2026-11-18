@@ -21,6 +21,7 @@ build/
 # Local uploaded violation snapshots & media
 backend/uploads/evidence/*
 !backend/uploads/evidence/.gitkeep
+backend/yolo_config/
 
 # IDE & Editor settings
 .vscode/

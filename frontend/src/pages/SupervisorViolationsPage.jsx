@@ -278,10 +278,10 @@ export default function SupervisorViolationsPage() {
               </div>
 
               <div className="p-6 space-y-4 text-xs">
-                {selectedViolation.evidenceImageReference && (
+                {(selectedViolation.evidenceImageReference || selectedViolation.imageUrl) && (
                   <div className="aspect-video rounded-xl overflow-hidden bg-black border border-slate-800">
                     <AuthenticatedImage
-                      src={selectedViolation.evidenceImageReference}
+                      src={selectedViolation.evidenceImageReference || selectedViolation.imageUrl}
                       alt="Violation Evidence"
                       className="w-full h-full object-contain"
                     />

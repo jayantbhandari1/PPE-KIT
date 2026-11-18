@@ -908,6 +908,7 @@ def detect_video():
                 # Draw Visual Annotations
                 annotated_img = draw_compliance_annotations(frame, evaluated_persons, detected_objects, comp_status)
                 frame_annotated_b64 = encode_image_to_base64(annotated_img)
+                frame_annotated_data_url = f"data:image/jpeg;base64,{frame_annotated_b64}"
                 last_annotated_b64 = frame_annotated_b64
 
                 # 5. Persist Newly Confirmed Violation Incidents
@@ -924,6 +925,21 @@ def detect_video():
                         ep_id = st_dict.get("episode_id")
                         if ep_id and ep_id not in confirmed_video_episodes:
                             confirmed_video_episodes.add(ep_id)
+
+                            # Upload or save evidence snapshot for confirmed video episode
+                            image_url = None
+                            try:
+                                uploaded = upload_evidence_image(frame_annotated_b64, folder="ppe_violations")
+                                if uploaded and isinstance(uploaded, str) and (
+                                    uploaded.startswith("http://") or uploaded.startswith("https://") or uploaded.startswith("/")
+                                ):
+                                    image_url = uploaded
+                            except Exception as e:
+                                print("Snapshot video evidence upload notice:", e)
+                                image_url = None
+
+                            raw_evidence_ref = image_url or frame_annotated_data_url
+
                             vid_incident = {
                                 "episode_id": ep_id,
                                 "worker_id": worker_id,
@@ -947,8 +963,8 @@ def detect_video():
                                 "reviewerNotes": "",
                                 "first_missing_timestamp": st_dict.get("first_missing_timestamp"),
                                 "confirmed_timestamp": st_dict.get("confirmed_timestamp"),
-                                "imageUrl": None,
-                                "evidenceImageReference": frame_annotated_b64,
+                                "imageUrl": image_url,
+                                "evidenceImageReference": raw_evidence_ref,
                                 "processingMetadata": {
                                     "video_timestamp_sec": timestamp_sec,
                                     "accumulated_missing_sec": st_dict.get("accumulated_missing_sec", conf_dur),
@@ -966,7 +982,9 @@ def detect_video():
                                 "missing_ppe": cat,
                                 "zone_id": p_zid,
                                 "zone_name": p_zname,
-                                "episode_id": ep_id
+                                "episode_id": ep_id,
+                                "imageUrl": image_url,
+                                "evidenceImageReference": raw_evidence_ref
                             })
 
                 # 6. Automatic Resolution of Video Episodes upon Continuous Compliance
@@ -994,7 +1012,7 @@ def detect_video():
                     "compliance_status": comp_status,
                     "missing_ppe": missing_ppe,
                     "persons_count": len(evaluated_persons),
-                    "annotated_image": frame_annotated_b64,
+                    "annotated_image": frame_annotated_data_url,
                     "new_confirmed_violations": frame_new_violations,
                     "new_resolved_violations": frame_new_resolutions,
                     "persons": [
@@ -1032,7 +1050,7 @@ def detect_video():
             "total_resolutions_found": total_resolutions_found,
             "resolved_video_episodes": list(resolved_video_episodes),
             "persisted_incidents": persisted_incidents_list,
-            "annotated_image": last_annotated_b64,
+            "annotated_image": f"data:image/jpeg;base64,{last_annotated_b64}" if last_annotated_b64 else None,
             "frame_breakdown": frame_results,
             "camera_profile": {
                 "_id": camera_id_str,

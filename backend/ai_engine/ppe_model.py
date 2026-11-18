@@ -1,5 +1,12 @@
 import os
 import time
+
+# Ensure Ultralytics config directory is inside workspace to prevent AppData permission errors
+if "YOLO_CONFIG_DIR" not in os.environ:
+    _yolo_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "yolo_config")
+    os.makedirs(_yolo_dir, exist_ok=True)
+    os.environ["YOLO_CONFIG_DIR"] = _yolo_dir
+
 import cv2
 import numpy as np
 import base64

@@ -24,10 +24,40 @@ export default function AuthenticatedImage({ src, alt = "Forensic Evidence", cla
       return;
     }
 
-    // 1. Data URIs or direct external media bypass backend authentication
-    const isLocalBackendUpload = src.startsWith('/uploads/') || src.includes('/uploads/');
+    const cleanSrc = typeof src === 'string' ? src.trim() : '';
+    if (!cleanSrc) {
+      setBlobUrl(null);
+      setError(false);
+      setLoading(false);
+      return;
+    }
+
+    // 1. Data URIs or direct blob URLs bypass backend authentication
+    if (cleanSrc.startsWith('data:') || cleanSrc.startsWith('blob:')) {
+      setBlobUrl(cleanSrc);
+      setError(false);
+      setLoading(false);
+      return;
+    }
+
+    // 2. Raw base64 strings (JPEG starts with /9j/, PNG starts with iVBORw0KGgo)
+    if (
+      cleanSrc.startsWith('/9j/') ||
+      cleanSrc.startsWith('iVBORw0KGgo') ||
+      (!cleanSrc.startsWith('http') && !cleanSrc.includes('/uploads/') && cleanSrc.length > 200)
+    ) {
+      const mime = cleanSrc.startsWith('iVBORw0KGgo') ? 'image/png' : 'image/jpeg';
+      setBlobUrl(`data:${mime};base64,${cleanSrc}`);
+      setError(false);
+      setLoading(false);
+      return;
+    }
+
+    // 3. Check if it's a local backend protected upload
+    const isLocalBackendUpload = cleanSrc.startsWith('/uploads/') || cleanSrc.includes('/uploads/');
     if (!isLocalBackendUpload) {
-      setBlobUrl(src);
+      // Direct external URL (e.g., https://res.cloudinary.com/...)
+      setBlobUrl(cleanSrc);
       setError(false);
       setLoading(false);
       return;
@@ -43,9 +73,9 @@ export default function AuthenticatedImage({ src, alt = "Forensic Evidence", cla
       headers['Authorization'] = `Bearer ${token}`;
     }
 
-    const targetUrl = src.startsWith('http://') || src.startsWith('https://')
-      ? src
-      : `${AI_BASE_URL}${src.startsWith('/') ? '' : '/'}${src}`;
+    const targetUrl = cleanSrc.startsWith('http://') || cleanSrc.startsWith('https://')
+      ? cleanSrc
+      : `${AI_BASE_URL}${cleanSrc.startsWith('/') ? '' : '/'}${cleanSrc}`;
 
     fetch(targetUrl, { headers })
       .then((res) => {
@@ -99,6 +129,7 @@ export default function AuthenticatedImage({ src, alt = "Forensic Evidence", cla
       src={blobUrl}
       alt={alt}
       className={className}
+      onError={() => setError(true)}
     />
   );
 }

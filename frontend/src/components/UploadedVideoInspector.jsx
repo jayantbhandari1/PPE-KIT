@@ -20,12 +20,27 @@ import {
   X,
   FileVideo,
   Eye,
-  Info
+  Info,
+  MonitorPlay,
+  Sparkles
 } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import api, { AI_BASE_URL } from '../services/api';
 import CameraPolygonModal from './CameraPolygonModal';
 import { getZoneColor, formatSvgPoints, computePolygonCentroid } from '../services/cameraPolygonService';
+
+/**
+ * Ensures annotated frame images are always standard data URLs or valid URIs.
+ */
+function getAnnotatedFrameSrc(imgStr) {
+  if (!imgStr) return '';
+  const trimmed = typeof imgStr === 'string' ? imgStr.trim() : '';
+  if (!trimmed) return '';
+  if (trimmed.startsWith('data:') || trimmed.startsWith('blob:') || trimmed.startsWith('http://') || trimmed.startsWith('https://')) {
+    return trimmed;
+  }
+  return `data:image/jpeg;base64,${trimmed}`;
+}
 
 export default function UploadedVideoInspector({
   allCameras = [],
@@ -36,6 +51,10 @@ export default function UploadedVideoInspector({
   const [videoPreviewUrl, setVideoPreviewUrl] = useState(null);
   const [extractedFrameUrl, setExtractedFrameUrl] = useState(null);
   const [videoDuration, setVideoDuration] = useState(0);
+
+  // View Mode: 'hud' (AI Annotated Detection Frames) vs 'video' (Original Uploaded Video)
+  const [viewMode, setViewMode] = useState('video');
+  const [frameImageError, setFrameImageError] = useState(false);
 
   // Camera profile association
   const [selectedCameraId, setSelectedCameraId] = useState(''); // '' means unzoned mode
@@ -53,11 +72,21 @@ export default function UploadedVideoInspector({
   const [showZoneBoundaries, setShowZoneBoundaries] = useState(true);
 
   const fileInputRef = useRef(null);
+  const videoPlayerRef = useRef(null);
   const playbackTimerRef = useRef(null);
 
   // Selected camera profile object
   const activeCamera = allCameras.find((c) => String(c._id) === String(selectedCameraId)) || null;
   const hasPolygons = Boolean(activeCamera && Array.isArray(activeCamera.zones) && activeCamera.zones.length > 0);
+
+  // Cleanup object URLs to avoid memory leaks
+  useEffect(() => {
+    return () => {
+      if (videoPreviewUrl) {
+        URL.revokeObjectURL(videoPreviewUrl);
+      }
+    };
+  }, [videoPreviewUrl]);
 
   // Handle video file selection & representative frame extraction
   const handleFileChange = (e) => {
@@ -69,11 +98,17 @@ export default function UploadedVideoInspector({
       return;
     }
 
+    if (videoPreviewUrl) {
+      URL.revokeObjectURL(videoPreviewUrl);
+    }
+
     setSelectedFile(file);
     setProcessingError('');
     setInspectionResult(null);
     setCurrentFrameIdx(0);
     setIsPlaying(false);
+    setViewMode('video');
+    setFrameImageError(false);
 
     const blobUrl = URL.createObjectURL(file);
     setVideoPreviewUrl(blobUrl);
@@ -117,6 +152,7 @@ export default function UploadedVideoInspector({
     setInspectionResult(null);
     setCurrentFrameIdx(0);
     setIsPlaying(false);
+    setFrameImageError(false);
 
     try {
       const formData = new FormData();
@@ -137,6 +173,8 @@ export default function UploadedVideoInspector({
       const data = res.data;
       setInspectionResult(data);
       setCurrentFrameIdx(0);
+      setViewMode('hud');
+      setFrameImageError(false);
 
       // Auto-start playback of processed frames
       if (Array.isArray(data.frame_breakdown) && data.frame_breakdown.length > 0) {
@@ -148,6 +186,26 @@ export default function UploadedVideoInspector({
     } finally {
       setIsProcessing(false);
     }
+  };
+
+  // Jump to specific confirmed incident timestamp and select closest frame
+  const handleJumpToIncident = (inc) => {
+    const targetSec = inc.processingMetadata?.video_timestamp_sec;
+    if (targetSec === undefined || !inspectionResult?.frame_breakdown?.length) return;
+    setViewMode('hud');
+    setIsPlaying(false);
+    setFrameImageError(false);
+
+    let closestIdx = 0;
+    let minDiff = Infinity;
+    inspectionResult.frame_breakdown.forEach((frame, idx) => {
+      const diff = Math.abs((frame.timestamp_sec ?? 0) - targetSec);
+      if (diff < minDiff) {
+        minDiff = diff;
+        closestIdx = idx;
+      }
+    });
+    setCurrentFrameIdx(closestIdx);
   };
 
   // Frame playback timer loop
@@ -351,344 +409,509 @@ export default function UploadedVideoInspector({
         </div>
       </div>
 
-      {/* 2. Inspection Player & Live Annotated Frame Playback */}
-      {inspectionResult && (
+      {/* 2. Inspection Player & Video Viewport */}
+      {(selectedFile || inspectionResult) && (
         <div className="bg-slate-900 border border-slate-800 rounded-3xl p-5 lg:p-6 shadow-2xl space-y-5 animate-in fade-in">
-          {/* Summary Banner */}
-          <div
-            className={`p-4 rounded-2xl border flex flex-col md:flex-row md:items-center md:justify-between gap-3 ${
-              inspectionResult.overall_compliance_status === 'COMPLIANT'
-                ? 'bg-emerald-950/60 border-emerald-800 text-emerald-200'
-                : 'bg-rose-950/60 border-rose-800 text-rose-200'
-            }`}
-          >
-            <div className="flex items-center gap-3">
-              {inspectionResult.overall_compliance_status === 'COMPLIANT' ? (
-                <ShieldCheck className="w-8 h-8 text-emerald-400 flex-shrink-0" />
-              ) : (
-                <ShieldAlert className="w-8 h-8 text-rose-400 flex-shrink-0" />
-              )}
-              <div>
-                <h3 className="font-bold text-sm lg:text-base leading-tight">
-                  {inspectionResult.overall_compliance_status === 'COMPLIANT'
-                    ? 'Inspection Complete: All Workers Fully Compliant'
-                    : 'Inspection Complete: Safety Violations Confirmed'}
-                </h3>
-                <p className="text-xs opacity-85 mt-0.5">
-                  Processed {inspectionResult.total_frames_processed} chronological frames. Found{' '}
-                  <strong>{inspectionResult.total_violations_found}</strong> confirmed violation episode(s) and{' '}
-                  <strong>{inspectionResult.total_resolutions_found}</strong> automatic resolution(s).
-                </p>
+          {/* Summary Banner (shown when inspection is complete) */}
+          {inspectionResult && (
+            <div
+              className={`p-4 rounded-2xl border flex flex-col md:flex-row md:items-center md:justify-between gap-3 ${
+                inspectionResult.overall_compliance_status === 'COMPLIANT'
+                  ? 'bg-emerald-950/60 border-emerald-800 text-emerald-200'
+                  : 'bg-rose-950/60 border-rose-800 text-rose-200'
+              }`}
+            >
+              <div className="flex items-center gap-3">
+                {inspectionResult.overall_compliance_status === 'COMPLIANT' ? (
+                  <ShieldCheck className="w-8 h-8 text-emerald-400 flex-shrink-0" />
+                ) : (
+                  <ShieldAlert className="w-8 h-8 text-rose-400 flex-shrink-0" />
+                )}
+                <div>
+                  <h3 className="font-bold text-sm lg:text-base leading-tight">
+                    {inspectionResult.overall_compliance_status === 'COMPLIANT'
+                      ? 'Inspection Complete: All Workers Fully Compliant'
+                      : 'Inspection Complete: Safety Violations Confirmed'}
+                  </h3>
+                  <p className="text-xs opacity-85 mt-0.5">
+                    Processed {inspectionResult.total_frames_processed} chronological frames. Found{' '}
+                    <strong>{inspectionResult.total_violations_found}</strong> confirmed violation episode(s) and{' '}
+                    <strong>{inspectionResult.total_resolutions_found}</strong> automatic resolution(s).
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <Link
+                  to="/admin/violations"
+                  className="px-4 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold border border-slate-700 flex items-center gap-1.5 transition shadow"
+                >
+                  <span>View Violations Log</span>
+                  <ChevronRight className="w-3.5 h-3.5" />
+                </Link>
               </div>
             </div>
-
-            <div className="flex items-center gap-2">
-              <Link
-                to="/admin/violations"
-                className="px-4 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold border border-slate-700 flex items-center gap-1.5 transition shadow"
-              >
-                <span>View Violations Log</span>
-                <ChevronRight className="w-3.5 h-3.5" />
-              </Link>
-            </div>
-          </div>
+          )}
 
           {/* Main Video Viewport Grid */}
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
-            {/* Left 2 Cols: Annotated Frame Screen */}
+            {/* Left 2 Cols: Video / HUD Screen */}
             <div className="lg:col-span-2 space-y-3">
-              <div className="relative aspect-video rounded-2xl bg-slate-950 border-2 border-slate-800 overflow-hidden shadow-2xl flex items-center justify-center">
-                {currentFrame?.annotated_image ? (
-                  <img
-                    src={currentFrame.annotated_image}
-                    alt={`Frame ${currentFrame.frame_idx}`}
-                    className="w-full h-full object-contain select-none"
-                  />
-                ) : (
-                  <div className="text-slate-500 text-xs flex flex-col items-center gap-2">
-                    <Film className="w-8 h-8 opacity-40" />
-                    <span>No frame available</span>
-                  </div>
-                )}
+              {/* View Mode Switcher Header */}
+              <div className="flex items-center justify-between px-1">
+                <div className="flex items-center gap-2">
+                  {inspectionResult && (
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setViewMode('hud');
+                          setIsPlaying(false);
+                        }}
+                        className={`px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition cursor-pointer border ${
+                          viewMode === 'hud'
+                            ? 'bg-sky-600 border-sky-500 text-white shadow-md shadow-sky-600/30'
+                            : 'bg-slate-950 border-slate-800 text-slate-400 hover:text-slate-200'
+                        }`}
+                      >
+                        <Sparkles className="w-3.5 h-3.5 text-sky-300" />
+                        <span>AI Detection HUD</span>
+                      </button>
 
-                {/* Zone Boundaries SVG Overlay */}
-                {showZoneBoundaries && activeCameraZones.length > 0 && (
-                  <svg
-                    className="absolute inset-0 w-full h-full pointer-events-none select-none z-10"
-                    viewBox="0 0 1000 1000"
-                    preserveAspectRatio="none"
-                  >
-                    {activeCameraZones.map((m, zIdx) => {
-                      const color = getZoneColor(zIdx);
-                      const pointsStr = formatSvgPoints(m.polygon, 1000);
-                      const centroid = computePolygonCentroid(m.polygon);
-                      return (
-                        <g key={m.zoneId || zIdx}>
-                          <polygon
-                            points={pointsStr}
-                            fill={color.fill}
-                            stroke={color.stroke}
-                            strokeWidth="3"
-                            strokeDasharray="6 3"
-                          />
-                          <g transform={`translate(${centroid.x * 1000}, ${centroid.y * 1000})`}>
-                            <rect
-                              x="-60"
-                              y="-13"
-                              width="120"
-                              height="26"
-                              rx="6"
-                              fill="#020617"
-                              fillOpacity="0.85"
-                              stroke={color.stroke}
-                              strokeWidth="1.5"
-                            />
-                            <text
-                              x="0"
-                              y="4"
-                              textAnchor="middle"
-                              fill="#ffffff"
-                              fontSize="14"
-                              fontWeight="bold"
-                            >
-                              {m.zoneName || `Zone ${m.zoneId}`}
-                            </text>
-                          </g>
-                        </g>
-                      );
-                    })}
-                  </svg>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setViewMode('video');
+                          setIsPlaying(false);
+                        }}
+                        className={`px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition cursor-pointer border ${
+                          viewMode === 'video'
+                            ? 'bg-sky-600 border-sky-500 text-white shadow-md shadow-sky-600/30'
+                            : 'bg-slate-950 border-slate-800 text-slate-400 hover:text-slate-200'
+                        }`}
+                      >
+                        <Film className="w-3.5 h-3.5" />
+                        <span>Original Video</span>
+                      </button>
+                    </>
+                  )}
+                </div>
+
+                <div className="text-right">
+                  {viewMode === 'hud' && inspectionResult?.frame_breakdown?.length ? (
+                    <span className="text-[11px] font-mono text-slate-400">
+                      Frame {currentFrameIdx + 1} of {inspectionResult.frame_breakdown.length} (t ={' '}
+                      {currentFrame?.timestamp_sec?.toFixed(1) ?? '0.0'}s)
+                    </span>
+                  ) : (
+                    <span className="text-[11px] text-slate-400">
+                      {isProcessing ? 'Analyzing Construction Video...' : 'Original Video Playback'}
+                    </span>
+                  )}
+                </div>
+              </div>
+
+              {/* Screen Viewport Container */}
+              <div className="relative aspect-video rounded-2xl bg-slate-950 border-2 border-slate-800 overflow-hidden shadow-2xl flex items-center justify-center">
+                {/* 1. HUD Mode: Render YOLO-Annotated Frame with Polygons */}
+                {viewMode === 'hud' && inspectionResult ? (
+                  <>
+                    {currentFrame?.annotated_image && !frameImageError ? (
+                      <img
+                        src={getAnnotatedFrameSrc(currentFrame.annotated_image)}
+                        alt={`Frame ${currentFrame.frame_idx}`}
+                        className="w-full h-full object-contain select-none"
+                        onError={() => setFrameImageError(true)}
+                      />
+                    ) : (
+                      <div className="text-slate-500 text-xs flex flex-col items-center gap-2 p-6 text-center">
+                        <AlertTriangle className="w-8 h-8 text-amber-500 opacity-60" />
+                        <span>Frame annotated image unavailable for frame #{currentFrameIdx + 1}</span>
+                        <span className="text-[10px] text-slate-600 font-mono">
+                          Switch to "Original Video" view above to inspect raw video footage.
+                        </span>
+                      </div>
+                    )}
+
+                    {/* Zone Boundaries SVG Overlay */}
+                    {showZoneBoundaries && activeCameraZones.length > 0 && (
+                      <svg
+                        className="absolute inset-0 w-full h-full pointer-events-none select-none z-10"
+                        viewBox="0 0 1000 1000"
+                        preserveAspectRatio="none"
+                      >
+                        {activeCameraZones.map((m, zIdx) => {
+                          const color = getZoneColor(zIdx);
+                          const pointsStr = formatSvgPoints(m.polygon, 1000);
+                          const centroid = computePolygonCentroid(m.polygon);
+                          return (
+                            <g key={m.zoneId || zIdx}>
+                              <polygon
+                                points={pointsStr}
+                                fill={color.fill}
+                                stroke={color.stroke}
+                                strokeWidth="3"
+                                strokeDasharray="6 3"
+                              />
+                              <g transform={`translate(${centroid.x * 1000}, ${centroid.y * 1000})`}>
+                                <rect
+                                  x="-60"
+                                  y="-13"
+                                  width="120"
+                                  height="26"
+                                  rx="6"
+                                  fill="#020617"
+                                  fillOpacity="0.85"
+                                  stroke={color.stroke}
+                                  strokeWidth="1.5"
+                                />
+                                <text
+                                  x="0"
+                                  y="4"
+                                  textAnchor="middle"
+                                  fill="#ffffff"
+                                  fontSize="14"
+                                  fontWeight="bold"
+                                >
+                                  {m.zoneName || `Zone ${m.zoneId}`}
+                                </text>
+                              </g>
+                            </g>
+                          );
+                        })}
+                      </svg>
+                    )}
+                  </>
+                ) : (
+                  /* 2. Video Mode: Render Native Video Player */
+                  <div className="w-full h-full relative flex items-center justify-center bg-black">
+                    {videoPreviewUrl ? (
+                      <video
+                        ref={videoPlayerRef}
+                        src={videoPreviewUrl}
+                        controls
+                        playsInline
+                        className="w-full h-full object-contain"
+                      />
+                    ) : (
+                      <div className="text-slate-500 text-xs flex flex-col items-center gap-2">
+                        <Film className="w-8 h-8 opacity-40" />
+                        <span>No video loaded</span>
+                      </div>
+                    )}
+
+                    {/* AI Scanning Radar Overlay during processing */}
+                    {isProcessing && (
+                      <div className="absolute inset-0 bg-slate-950/75 backdrop-blur-sm pointer-events-none flex flex-col items-center justify-center p-6 text-center z-20">
+                        <div className="relative w-16 h-16 mb-4 flex items-center justify-center">
+                          <div className="absolute inset-0 rounded-full border-2 border-sky-500/40 animate-ping"></div>
+                          <div className="w-12 h-12 rounded-full border-2 border-sky-400 border-t-transparent animate-spin"></div>
+                          <Sparkles className="w-6 h-6 text-sky-400 absolute" />
+                        </div>
+                        <div className="text-white font-bold text-sm tracking-wide">
+                          Analyzing Video with Dual YOLOv8 AI
+                        </div>
+                        <div className="text-xs text-sky-300 font-mono mt-1 max-w-md">
+                          Sampling frames • Detecting Workers, Hardhats, Vests, Boots • Evaluating Spatial Zones
+                        </div>
+                        <div className="mt-3 flex items-center gap-2">
+                          <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+                          <span className="text-[11px] text-slate-300 font-mono">Inference Engine Active</span>
+                        </div>
+                      </div>
+                    )}
+                  </div>
                 )}
               </div>
 
-              {/* Player Controls & Scrubber */}
-              <div className="p-3.5 rounded-2xl bg-slate-950 border border-slate-800 flex flex-col gap-2.5">
-                {/* Timeline Scrubber */}
-                <div className="flex items-center gap-3">
-                  <span className="text-[11px] text-slate-400 font-mono w-16">
-                    {currentFrame ? `${currentFrame.timestamp_sec.toFixed(1)}s` : '0.0s'}
-                  </span>
+              {/* Player Controls & Scrubber (HUD Mode) */}
+              {viewMode === 'hud' && inspectionResult?.frame_breakdown?.length ? (
+                <div className="p-3.5 rounded-2xl bg-slate-950 border border-slate-800 flex flex-col gap-2.5">
+                  {/* Timeline Scrubber */}
+                  <div className="flex items-center gap-3">
+                    <span className="text-[11px] text-slate-400 font-mono w-16">
+                      {currentFrame ? `${currentFrame.timestamp_sec.toFixed(1)}s` : '0.0s'}
+                    </span>
 
-                  <input
-                    type="range"
-                    min={0}
-                    max={Math.max(0, (inspectionResult.frame_breakdown?.length || 1) - 1)}
-                    value={currentFrameIdx}
-                    onChange={(e) => {
-                      setIsPlaying(false);
-                      setCurrentFrameIdx(Number(e.target.value));
-                    }}
-                    className="flex-1 accent-sky-500 cursor-pointer h-1.5 bg-slate-800 rounded-lg"
-                  />
-
-                  <span className="text-[11px] text-slate-400 font-mono w-24 text-right">
-                    Frame {currentFrameIdx + 1} / {inspectionResult.frame_breakdown?.length}
-                  </span>
-                </div>
-
-                {/* Play / Step Buttons & Options */}
-                <div className="flex items-center justify-between pt-1">
-                  <div className="flex items-center gap-2">
-                    <button
-                      type="button"
-                      onClick={() => {
+                    <input
+                      type="range"
+                      min={0}
+                      max={Math.max(0, (inspectionResult.frame_breakdown?.length || 1) - 1)}
+                      value={currentFrameIdx}
+                      onChange={(e) => {
                         setIsPlaying(false);
-                        setCurrentFrameIdx((prev) => Math.max(0, prev - 1));
+                        setCurrentFrameIdx(Number(e.target.value));
                       }}
-                      className="p-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-slate-300 transition"
-                      title="Step Backward 1 Frame"
-                    >
-                      <SkipBack className="w-4 h-4" />
-                    </button>
+                      className="flex-1 accent-sky-500 cursor-pointer h-1.5 bg-slate-800 rounded-lg"
+                    />
 
-                    <button
-                      type="button"
-                      onClick={() => setIsPlaying(!isPlaying)}
-                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-sky-600 hover:bg-sky-500 text-white text-xs font-bold shadow-md shadow-sky-600/30 transition"
-                    >
-                      {isPlaying ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4" />}
-                      <span>{isPlaying ? 'Pause' : 'Play'}</span>
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setIsPlaying(false);
-                        setCurrentFrameIdx((prev) =>
-                          Math.min((inspectionResult.frame_breakdown?.length || 1) - 1, prev + 1)
-                        );
-                      }}
-                      className="p-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-slate-300 transition"
-                      title="Step Forward 1 Frame"
-                    >
-                      <SkipForward className="w-4 h-4" />
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setIsPlaying(false);
-                        setCurrentFrameIdx(0);
-                      }}
-                      className="p-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-white transition"
-                      title="Rewind to Beginning"
-                    >
-                      <RotateCcw className="w-4 h-4" />
-                    </button>
+                    <span className="text-[11px] text-slate-400 font-mono w-24 text-right">
+                      Frame {currentFrameIdx + 1} / {inspectionResult.frame_breakdown?.length}
+                    </span>
                   </div>
 
-                  <div className="flex items-center gap-3">
-                    {/* Speed Selector */}
-                    <div className="flex items-center gap-1 text-[11px] text-slate-400">
-                      <span>Speed:</span>
+                  {/* Play / Step Buttons & Options */}
+                  <div className="flex items-center justify-between pt-1">
+                    <div className="flex items-center gap-2">
                       <button
-                        onClick={() => setPlaybackSpeed(800)}
-                        className={`px-2 py-0.5 rounded ${playbackSpeed === 800 ? 'bg-sky-600 text-white font-bold' : 'bg-slate-800'}`}
+                        type="button"
+                        onClick={() => {
+                          setIsPlaying(false);
+                          setCurrentFrameIdx((prev) => Math.max(0, prev - 1));
+                        }}
+                        className="p-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-slate-300 transition cursor-pointer"
+                        title="Step Backward 1 Frame"
                       >
-                        1x
+                        <SkipBack className="w-4 h-4" />
                       </button>
+
                       <button
-                        onClick={() => setPlaybackSpeed(400)}
-                        className={`px-2 py-0.5 rounded ${playbackSpeed === 400 ? 'bg-sky-600 text-white font-bold' : 'bg-slate-800'}`}
+                        type="button"
+                        onClick={() => setIsPlaying(!isPlaying)}
+                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-sky-600 hover:bg-sky-500 text-white text-xs font-bold shadow-md shadow-sky-600/30 transition cursor-pointer"
                       >
-                        2x
+                        {isPlaying ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4" />}
+                        <span>{isPlaying ? 'Pause' : 'Play'}</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setIsPlaying(false);
+                          setCurrentFrameIdx((prev) =>
+                            Math.min((inspectionResult.frame_breakdown?.length || 1) - 1, prev + 1)
+                          );
+                        }}
+                        className="p-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-slate-300 transition cursor-pointer"
+                        title="Step Forward 1 Frame"
+                      >
+                        <SkipForward className="w-4 h-4" />
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setIsPlaying(false);
+                          setCurrentFrameIdx(0);
+                        }}
+                        className="p-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-white transition cursor-pointer"
+                        title="Rewind to Beginning"
+                      >
+                        <RotateCcw className="w-4 h-4" />
                       </button>
                     </div>
 
-                    {/* Zone Overlay Toggle */}
-                    {activeCameraZones.length > 0 && (
-                      <button
-                        type="button"
-                        onClick={() => setShowZoneBoundaries(!showZoneBoundaries)}
-                        className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold flex items-center gap-1 border transition ${
-                          showZoneBoundaries
-                            ? 'bg-sky-950/60 border-sky-700 text-sky-300'
-                            : 'bg-slate-900 border-slate-800 text-slate-400'
-                        }`}
-                      >
-                        <Layers className="w-3.5 h-3.5 text-sky-400" />
-                        <span>{showZoneBoundaries ? 'Zones On' : 'Zones Off'}</span>
-                      </button>
-                    )}
+                    <div className="flex items-center gap-3">
+                      {/* Speed Selector */}
+                      <div className="flex items-center gap-1 text-[11px] text-slate-400">
+                        <span>Speed:</span>
+                        <button
+                          type="button"
+                          onClick={() => setPlaybackSpeed(800)}
+                          className={`px-2 py-0.5 rounded cursor-pointer ${
+                            playbackSpeed === 800 ? 'bg-sky-600 text-white font-bold' : 'bg-slate-800'
+                          }`}
+                        >
+                          1x
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setPlaybackSpeed(400)}
+                          className={`px-2 py-0.5 rounded cursor-pointer ${
+                            playbackSpeed === 400 ? 'bg-sky-600 text-white font-bold' : 'bg-slate-800'
+                          }`}
+                        >
+                          2x
+                        </button>
+                      </div>
+
+                      {/* Zone Overlay Toggle */}
+                      {activeCameraZones.length > 0 && (
+                        <button
+                          type="button"
+                          onClick={() => setShowZoneBoundaries(!showZoneBoundaries)}
+                          className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold flex items-center gap-1 border transition cursor-pointer ${
+                            showZoneBoundaries
+                              ? 'bg-sky-950/60 border-sky-700 text-sky-300'
+                              : 'bg-slate-900 border-slate-800 text-slate-400'
+                          }`}
+                        >
+                          <Layers className="w-3.5 h-3.5 text-sky-400" />
+                          <span>{showZoneBoundaries ? 'Zones On' : 'Zones Off'}</span>
+                        </button>
+                      )}
+                    </div>
                   </div>
                 </div>
-              </div>
+              ) : (
+                /* Information bar in Video Mode */
+                <div className="p-3 rounded-2xl bg-slate-950 border border-slate-800 flex items-center justify-between text-xs text-slate-400">
+                  <span className="flex items-center gap-2">
+                    <Info className="w-4 h-4 text-sky-400 flex-shrink-0" />
+                    <span>
+                      {inspectionResult
+                        ? 'Viewing source video. Switch to "AI Detection HUD" to inspect bounding boxes and safety status.'
+                        : 'Video preview active. Click "Start Video Inspection" above to run AI optical compliance audit.'}
+                    </span>
+                  </span>
+                </div>
+              )}
             </div>
 
             {/* Right 1 Col: Current Frame Inspector & Persisted Incidents */}
             <div className="space-y-4 flex flex-col justify-between">
-              {/* Current Frame Status Card */}
-              <div className="p-4 rounded-2xl bg-slate-950 border border-slate-800 space-y-3">
-                <div className="flex items-center justify-between">
-                  <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">
-                    Current Frame Details
-                  </span>
-                  <span
-                    className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
-                      currentFrame?.compliance_status === 'COMPLIANT'
-                        ? 'bg-emerald-950 text-emerald-400 border border-emerald-800'
-                        : currentFrame?.compliance_status === 'VIOLATION'
-                        ? 'bg-rose-950 text-rose-400 border border-rose-800'
-                        : 'bg-amber-950 text-amber-400 border border-amber-800'
-                    }`}
-                  >
-                    {currentFrame?.compliance_status || 'UNCERTAIN'}
-                  </span>
-                </div>
+              {inspectionResult ? (
+                <>
+                  {/* Current Frame Status Card */}
+                  <div className="p-4 rounded-2xl bg-slate-950 border border-slate-800 space-y-3">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">
+                        Current Frame Details
+                      </span>
+                      <span
+                        className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
+                          currentFrame?.compliance_status === 'COMPLIANT'
+                            ? 'bg-emerald-950 text-emerald-400 border border-emerald-800'
+                            : currentFrame?.compliance_status === 'VIOLATION'
+                            ? 'bg-rose-950 text-rose-400 border border-rose-800'
+                            : 'bg-amber-950 text-amber-400 border border-amber-800'
+                        }`}
+                      >
+                        {currentFrame?.compliance_status || 'UNCERTAIN'}
+                      </span>
+                    </div>
 
-                {/* Workers in this frame */}
-                <div className="space-y-2">
-                  <span className="text-[11px] font-semibold text-slate-300 block">
-                    Workers Present ({currentFrame?.persons?.length || 0}):
-                  </span>
-                  {currentFrame?.persons?.length === 0 ? (
-                    <p className="text-xs text-slate-500 italic">No workers in frame.</p>
-                  ) : (
-                    <div className="space-y-1.5 max-h-44 overflow-y-auto pr-1">
-                      {currentFrame?.persons?.map((p, idx) => (
-                        <div
-                          key={p.track_id || idx}
-                          className="p-2.5 rounded-xl bg-slate-900 border border-slate-800 text-xs flex items-center justify-between"
-                        >
-                          <div>
-                            <div className="font-bold text-white flex items-center gap-1.5">
-                              <span>{p.worker_id}</span>
-                              <span className="text-[10px] text-slate-400 font-mono font-normal">
-                                (Track #{p.track_id})
+                    {/* Workers in this frame */}
+                    <div className="space-y-2">
+                      <span className="text-[11px] font-semibold text-slate-300 block">
+                        Workers Present ({currentFrame?.persons?.length || 0}):
+                      </span>
+                      {currentFrame?.persons?.length === 0 ? (
+                        <p className="text-xs text-slate-500 italic">No workers in frame.</p>
+                      ) : (
+                        <div className="space-y-1.5 max-h-44 overflow-y-auto pr-1">
+                          {currentFrame?.persons?.map((p, idx) => (
+                            <div
+                              key={p.track_id || idx}
+                              className="p-2.5 rounded-xl bg-slate-900 border border-slate-800 text-xs flex items-center justify-between"
+                            >
+                              <div>
+                                <div className="font-bold text-white flex items-center gap-1.5">
+                                  <span>{p.worker_id}</span>
+                                  <span className="text-[10px] text-slate-400 font-mono font-normal">
+                                    (Track #{p.track_id})
+                                  </span>
+                                </div>
+                                <span className="text-[10px] text-slate-400 block mt-0.5">
+                                  Zone: {p.zone_name || (p.zone_id ? `Zone ${p.zone_id}` : 'Unassigned / Neutral')}
+                                </span>
+                              </div>
+
+                              <div className="text-right">
+                                {p.compliant ? (
+                                  <span className="text-[10px] font-bold text-emerald-400 bg-emerald-950 px-2 py-0.5 rounded border border-emerald-800">
+                                    COMPLIANT
+                                  </span>
+                                ) : p.uncertain ? (
+                                  <span className="text-[10px] font-bold text-amber-400 bg-amber-950 px-2 py-0.5 rounded border border-amber-800">
+                                    {p.uncertain_reason || 'UNCERTAIN'}
+                                  </span>
+                                ) : (
+                                  <span className="text-[10px] font-bold text-rose-400 bg-rose-950 px-2 py-0.5 rounded border border-rose-800">
+                                    MISSING {p.missing_ppe?.join(', ')?.toUpperCase()}
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Persisted Incidents Timeline List */}
+                  <div className="p-4 rounded-2xl bg-slate-950 border border-slate-800 space-y-3">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider flex items-center gap-1.5">
+                        <ShieldAlert className="w-3.5 h-3.5 text-rose-400" />
+                        <span>Persisted Incidents ({inspectionResult.persisted_incidents?.length || 0})</span>
+                      </span>
+                      <Link
+                        to="/admin/violations"
+                        className="text-[11px] text-sky-400 hover:text-sky-300 font-semibold"
+                      >
+                        View All
+                      </Link>
+                    </div>
+
+                    <div className="space-y-2 max-h-48 overflow-y-auto pr-1">
+                      {inspectionResult.persisted_incidents?.length === 0 ? (
+                        <div className="text-center py-4 text-xs text-slate-500">
+                          No violations confirmed during this inspection session.
+                        </div>
+                      ) : (
+                        inspectionResult.persisted_incidents?.map((inc, i) => (
+                          <div
+                            key={inc.episode_id || i}
+                            onClick={() => handleJumpToIncident(inc)}
+                            className="p-2.5 rounded-xl bg-slate-900 hover:bg-slate-850 border border-slate-800 hover:border-sky-700/60 transition cursor-pointer text-xs space-y-1 group"
+                            title="Click to jump player directly to this incident frame"
+                          >
+                            <div className="flex items-center justify-between">
+                              <span className="font-bold text-white text-xs group-hover:text-sky-300 transition">
+                                {inc.worker_id}
+                              </span>
+                              <span className="px-1.5 py-0.5 rounded bg-rose-950 text-rose-400 text-[9px] font-bold border border-rose-800 uppercase">
+                                OPEN INCIDENT
                               </span>
                             </div>
-                            <span className="text-[10px] text-slate-400 block mt-0.5">
-                              Zone: {p.zone_name || (p.zone_id ? `Zone ${p.zone_id}` : 'Unassigned / Neutral')}
-                            </span>
+                            <div className="text-[11px] text-slate-400">
+                              Missing: <strong className="text-rose-300">{inc.missingPPE?.join(', ')}</strong> in{' '}
+                              {inc.zoneName || 'Monitored Zone'}
+                            </div>
+                            <div className="text-[10px] text-slate-500 font-mono flex items-center justify-between pt-1 border-t border-slate-800/80">
+                              <span>Camera: {inc.cameraName || inc.cameraId}</span>
+                              <span className="text-sky-400 group-hover:underline">
+                                t = {inc.processingMetadata?.video_timestamp_sec ?? 0}s (Jump)
+                              </span>
+                            </div>
                           </div>
-
-                          <div className="text-right">
-                            {p.compliant ? (
-                              <span className="text-[10px] font-bold text-emerald-400 bg-emerald-950 px-2 py-0.5 rounded border border-emerald-800">
-                                COMPLIANT
-                              </span>
-                            ) : p.uncertain ? (
-                              <span className="text-[10px] font-bold text-amber-400 bg-amber-950 px-2 py-0.5 rounded border border-amber-800">
-                                {p.uncertain_reason || 'UNCERTAIN'}
-                              </span>
-                            ) : (
-                              <span className="text-[10px] font-bold text-rose-400 bg-rose-950 px-2 py-0.5 rounded border border-rose-800">
-                                MISSING {p.missing_ppe?.join(', ')?.toUpperCase()}
-                              </span>
-                            )}
-                          </div>
-                        </div>
-                      ))}
+                        ))
+                      )}
                     </div>
-                  )}
+                  </div>
+                </>
+              ) : (
+                /* Pre-Inspection Ready Card */
+                <div className="p-4 rounded-2xl bg-slate-950 border border-slate-800 space-y-4">
+                  <div className="flex items-center gap-2 text-white font-bold text-xs">
+                    <Sparkles className="w-4 h-4 text-sky-400" />
+                    <span>Inspection Ready</span>
+                  </div>
+                  <p className="text-xs text-slate-400 leading-relaxed">
+                    Video file is loaded and calibrated. Click{' '}
+                    <strong className="text-sky-300">"Start Video Inspection"</strong> to execute the full AI pipeline:
+                  </p>
+                  <ul className="text-[11px] text-slate-300 space-y-2">
+                    <li className="flex items-start gap-2">
+                      <span className="w-1.5 h-1.5 rounded-full bg-sky-400 mt-1.5 flex-shrink-0"></span>
+                      <span>Dual YOLOv8 Person & PPE detection ensemble</span>
+                    </li>
+                    <li className="flex items-start gap-2">
+                      <span className="w-1.5 h-1.5 rounded-full bg-sky-400 mt-1.5 flex-shrink-0"></span>
+                      <span>Spatial Ray-Casting & polygon safety zone resolution</span>
+                    </li>
+                    <li className="flex items-start gap-2">
+                      <span className="w-1.5 h-1.5 rounded-full bg-sky-400 mt-1.5 flex-shrink-0"></span>
+                      <span>Temporal hysteresis confirmation (3.0s confirmation gate)</span>
+                    </li>
+                    <li className="flex items-start gap-2">
+                      <span className="w-1.5 h-1.5 rounded-full bg-sky-400 mt-1.5 flex-shrink-0"></span>
+                      <span>Forensic violation snapshot generation for audit ledger</span>
+                    </li>
+                  </ul>
                 </div>
-              </div>
-
-              {/* Persisted Incidents Timeline List */}
-              <div className="p-4 rounded-2xl bg-slate-950 border border-slate-800 space-y-3">
-                <div className="flex items-center justify-between">
-                  <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider flex items-center gap-1.5">
-                    <ShieldAlert className="w-3.5 h-3.5 text-rose-400" />
-                    <span>Persisted Incidents ({inspectionResult.persisted_incidents?.length || 0})</span>
-                  </span>
-                  <Link
-                    to="/admin/violations"
-                    className="text-[11px] text-sky-400 hover:text-sky-300 font-semibold"
-                  >
-                    View All
-                  </Link>
-                </div>
-
-                <div className="space-y-2 max-h-48 overflow-y-auto pr-1">
-                  {inspectionResult.persisted_incidents?.length === 0 ? (
-                    <div className="text-center py-4 text-xs text-slate-500">
-                      No violations confirmed during this inspection session.
-                    </div>
-                  ) : (
-                    inspectionResult.persisted_incidents?.map((inc, i) => (
-                      <div
-                        key={inc.episode_id || i}
-                        className="p-2.5 rounded-xl bg-slate-900 border border-slate-800 text-xs space-y-1"
-                      >
-                        <div className="flex items-center justify-between">
-                          <span className="font-bold text-white text-xs">{inc.worker_id}</span>
-                          <span className="px-1.5 py-0.5 rounded bg-rose-950 text-rose-400 text-[9px] font-bold border border-rose-800 uppercase">
-                            OPEN INCIDENT
-                          </span>
-                        </div>
-                        <div className="text-[11px] text-slate-400">
-                          Missing: <strong className="text-rose-300">{inc.missingPPE?.join(', ')}</strong> in{' '}
-                          {inc.zoneName || 'Monitored Zone'}
-                        </div>
-                        <div className="text-[10px] text-slate-500 font-mono flex items-center justify-between pt-1 border-t border-slate-800/80">
-                          <span>Camera: {inc.cameraName || inc.cameraId}</span>
-                          <span>t = {inc.processingMetadata?.video_timestamp_sec ?? 0}s</span>
-                        </div>
-                      </div>
-                    ))
-                  )}
-                </div>
-              </div>
+              )}
             </div>
           </div>
         </div>

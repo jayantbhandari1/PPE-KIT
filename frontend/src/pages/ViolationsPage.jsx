@@ -348,10 +348,10 @@ export default function ViolationsPage() {
             {/* Modal Body */}
             <div className="p-6 overflow-y-auto space-y-4">
               {/* Evidence Snapshot */}
-              {selectedEvent.evidenceImageReference && (
+              {(selectedEvent.evidenceImageReference || selectedEvent.imageUrl) && (
                 <div className="rounded-xl overflow-hidden border border-slate-800 bg-black aspect-video flex items-center justify-center">
                   <AuthenticatedImage
-                    src={selectedEvent.evidenceImageReference}
+                    src={selectedEvent.evidenceImageReference || selectedEvent.imageUrl}
                     alt="Forensic Evidence"
                     className="w-full h-full object-contain"
                   />
